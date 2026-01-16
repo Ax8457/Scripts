@@ -1,91 +1,80 @@
 import random
 from Crypto.Util.number import getPrime, inverse, bytes_to_long, long_to_bytes, GCD
 from flask import Flask, request, jsonify
+from Crypto.Util.Padding import pad, unpad
 
 app = Flask(__name__)
 
-def craft_E(message_size=160):
+def craft_E(message_size):
     E = []
-    e_sum = random.getrandbits(64) # first value of E 
+    e_sum = random.getrandbits(64)
     E.append(e_sum)
     for _ in range(message_size - 1):
         offset = random.getrandbits(32)
         e = e_sum + offset
-        e_sum += e
         E.append(e)
-    return E
+        e_sum += e
+    return E, e_sum
 
-def craft_privateKey(message_size=160):
-    print("Start pubkey generation")
-    w = getPrime(1024)
-    q = getPrime(1024)
+def craft_privateKey(message_size):
+    E, total_sum = craft_E(message_size)
+    q = total_sum + random.getrandbits(64)
+    w = random.getrandbits(1024)
     while GCD(w, q) != 1:
-        w = getPrime(1024)
-        q = getPrime(1024)	
-    print(f"w = {w}")
-    print(f"q = {q}")
-    E = craft_E()
-    print(f"Length of E {len(E)}")
-    while(E[-1] * 2 >= q):
-    	E = craft_E()
-    print(E[-1])
+        w = random.getrandbits(1024)
     return E, w, q
-
-E, w, q = craft_privateKey()
-app.config['E'] = E
-app.config['w'] = w
-app.config['q'] = q
-
-@app.route('/custom_encryption/publicKey/')
-def craft_publicKey():
-    E = app.config['E']
-    w = app.config['w']
-    q = app.config['q']
-    H = [ (w * e) % q for e in E ]
-    H_hex = [hex(h)[2:] for h in H]
-    return jsonify({"Public Key": H_hex})
 
 @app.route('/custom_encryption/encrypt/', methods=['POST'])
 def custom_encryption():
-    E = app.config['E']
-    w = app.config['w']
-    q = app.config['q']
     data = request.get_json()
-    H = data.get('H')
-    M = data.get('M')
-    print(f"Message received {M}")
-    H = [int(h, 16) for h in H]
-    M = bytes_to_long(M.encode()) 
-    B = list(map(int, bin(M)[2:].zfill(len(H))))
-    print(f"Number of bits: {len(B)}")
+    M_str = data.get('M')
+    M_bytes = M_str.encode()
+
+    message_bits_size = len(M_bytes) * 8
+    E, w, q = craft_privateKey(message_bits_size)
+
+    app.config['E'] = E
+    app.config['w'] = w
+    app.config['q'] = q
+    
+    H = [(w * e) % q for e in E]
+    
+    m_int = bytes_to_long(M_bytes)
+    B = list(map(int, bin(m_int)[2:].zfill(message_bits_size)))
     cipher = sum(h * b for h, b in zip(H, B))
-    #cipher_hex = hex(cipher)[2:]
-    return jsonify({"Cipher (int)": cipher})
+    
+    return jsonify({
+        "Cipher": cipher,
+        "MessageSizeBits": message_bits_size,
+        "PublicKey": [hex(h)[2:] for h in H]
+    })
 
 @app.route('/custom_encryption/decrypt/', methods=['POST'])
 def custom_decryption():
-    E = app.config['E']
-    w = app.config['w']
-    q = app.config['q']
+    E = app.config.get('E')
+    w = app.config.get('w')
+    q = app.config.get('q')
     data = request.get_json()
     c = data.get('Cipher')
-    E = list(map(int, E))
+    bits_size = data.get('MessageSizeBits')
+    	
     w_inv = inverse(w, q)
-    c = pow(c * w_inv,1,q)
-    m = []
-    E = E[::-1]
-    for e in E:
-        if e <= c:
-            c -= e
-            m.append(1)
+    c_prime = pow(c * w_inv, 1, q)
+    
+    m_bits = []
+    for e in reversed(E):
+        if e <= c_prime:
+            c_prime -= e
+            m_bits.append(1)
         else:
-            m.append(0)
-    m = m[::-1]
+            m_bits.append(0)
+    
+    m_bits.reverse()
     M_int = 0
-    bits = m
-    for bit in bits:
+    for bit in m_bits:
         M_int = (M_int << 1) | bit
-    return jsonify({"Plaintext": hex(M_int)[2:]})
+        
+    return jsonify({"Plaintext": long_to_bytes(M_int, bits_size // 8).decode()})
 
 if __name__ == '__main__':
     app.run(debug=True)
